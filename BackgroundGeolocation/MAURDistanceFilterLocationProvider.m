@@ -219,6 +219,12 @@ enum {
     MAURLocation *bestLocation = nil;
     for (CLLocation *location in locations) {
         MAURLocation *bgloc = [MAURLocation fromCLLocation:location];
+
+        //fill if nil. any location better then nothing
+        if (bestLocation == nil) {
+            bestLocation = bgloc;
+            continue;
+        }
         
         // test the age of the location measurement to determine if the measurement is cached
         // in most cases you will not want to rely on cached measurements
@@ -226,16 +232,12 @@ enum {
         if ([bgloc locationAge] > maxLocationAgeInSeconds || ![bgloc hasAccuracy] || ![bgloc hasTime]) {
             continue;
         }
-        
-        if (bestLocation == nil) {
+
+        //this logic must be unified for platforms. so do it in JS
+        //if ([bgloc isBetterLocation:bestLocation]) {
+        //    DDLogInfo(@"Better location found: %@", bgloc);
             bestLocation = bgloc;
-            continue;
-        }
-        
-        if ([bgloc isBetterLocation:bestLocation]) {
-            DDLogInfo(@"Better location found: %@", bgloc);
-            bestLocation = bgloc;
-        }
+        //}
     }
     
     if (bestLocation == nil) {
@@ -272,10 +274,10 @@ enum {
         
         if ([bestLocation.accuracy doubleValue] <= [_config.desiredAccuracy doubleValue]) {
             DDLogDebug(@"%@ found most accurate location before timeout", TAG);
-        } else if (-[aquireStartTime timeIntervalSinceNow] < maxLocationWaitTimeInSeconds) {
-            // we still have time to aquire better location
-            return;
-        }
+        }// else if (-[aquireStartTime timeIntervalSinceNow] < maxLocationWaitTimeInSeconds) {
+        //    // we still have time to aquire better location
+        //    return;
+        //}
         
         if ([_config isDebugging]) {
             [self notify:@"Aggressive monitoring engaged"];
