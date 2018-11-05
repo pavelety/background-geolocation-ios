@@ -17,12 +17,20 @@
 
 static NSString * const TAG = @"MAURPostLocationTask";
 
+@interface MAURPostLocationTask() <MAURBackgroundSyncDelegate>
+{
+    
+}
+@end
+
 @implementation MAURPostLocationTask
 {
     Reachability *reach;
     MAURBackgroundSync *uploader;
     BOOL hasConnectivity;
 }
+
+static MAURLocationTransform s_locationTransform = nil;
 
 - (instancetype) init
 {
@@ -35,6 +43,7 @@ static NSString * const TAG = @"MAURPostLocationTask";
     hasConnectivity = YES;
 
     uploader = [[MAURBackgroundSync alloc] init];
+    uploader.delegate = self;
     
     reach = [Reachability reachabilityWithHostname:@"www.google.com"];
     reach.reachableBlock = ^(Reachability *_reach) {
@@ -63,9 +72,22 @@ static NSString * const TAG = @"MAURPostLocationTask";
     [reach stopNotifier];
 }
 
-- (void) add:(MAURLocation*)location
+- (void) add:(MAURLocation * _Nonnull)inLocation
 {
+    // Take this variable on the main thread to be safe
+    MAURLocationTransform locationTransform = s_locationTransform;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        
+        MAURLocation *location = inLocation;
+        
+        if (locationTransform != nil) {
+            location = locationTransform(location);
+            
+            if (location == nil) {
+                return;
+            }
+        }
+        
         MAURSQLiteLocationDAO *locationDAO = [MAURSQLiteLocationDAO sharedInstance];
         // TODO: investigate location id always 0
         NSNumber *locationId = [locationDAO persistLocation:location limitRows:_config.maxLocations.integerValue];
@@ -115,12 +137,40 @@ static NSString * const TAG = @"MAURPostLocationTask";
     NSHTTPURLResponse* urlResponse = nil;
     [NSURLConnection sendSynchronousRequest:request returningResponse:&urlResponse error:outError];
     
-    if ([urlResponse statusCode] == 200 || [urlResponse statusCode] == 201) {
+    NSInteger statusCode = urlResponse.statusCode;
+    
+    if (statusCode == 285)
+    {
+        // Okay, but we don't need to continue sending these
+        
+        DDLogDebug(@"Location was sent to the server, and received an \"HTTP 285 Updated Not Required\"");
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (_delegate && [_delegate respondsToSelector:@selector(postLocationTaskRequestedAbortUpdates:)])
+            {
+                [_delegate postLocationTaskRequestedAbortUpdates:self];
+            }
+        });
+    }
+
+    if (statusCode == 401)
+    {   
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (_delegate && [_delegate respondsToSelector:@selector(postLocationTaskHttpAuthorizationUpdates:)])
+            {
+                [_delegate postLocationTaskHttpAuthorizationUpdates:self];
+            }
+        });
+    }
+    
+    // All 2xx statuses are okay
+    if (statusCode >= 200 && statusCode < 300)
+    {
         return YES;
     }
     
     if (*outError == nil) {
-        DDLogDebug(@"%@ Server error while posting locations responseCode: %ld", TAG, [urlResponse statusCode]);
+        DDLogDebug(@"%@ Server error while posting locations responseCode: %ld", TAG, (long)statusCode);
     } else {
         DDLogError(@"%@ Error while posting locations %@", TAG, [*outError localizedDescription]);
     }
@@ -132,6 +182,36 @@ static NSString * const TAG = @"MAURPostLocationTask";
 {
     if ([self.config hasValidSyncUrl]) {
         [uploader sync:self.config.syncUrl withTemplate:self.config._template withHttpHeaders:self.config.httpHeaders];
+    }
+}
+
+#pragma mark - Location transform
+
++ (void) setLocationTransform:(MAURLocationTransform _Nullable)transform
+{
+    s_locationTransform = transform;
+}
+
++ (MAURLocationTransform _Nullable) locationTransform
+{
+    return s_locationTransform;
+}
+
+#pragma mark - MAURBackgroundSyncDelegate
+
+- (void)backgroundSyncRequestedAbortUpdates:(MAURBackgroundSync *)task
+{
+    if (_delegate && [_delegate respondsToSelector:@selector(postLocationTaskRequestedAbortUpdates:)])
+    {
+        [_delegate postLocationTaskRequestedAbortUpdates:self];
+    }
+}
+
+- (void)backgroundSyncHttpAuthorizationUpdates:(MAURBackgroundSync *)task
+{
+    if (_delegate && [_delegate respondsToSelector:@selector(postLocationTaskHttpAuthorizationUpdates:)])
+    {
+        [_delegate postLocationTaskHttpAuthorizationUpdates:self];
     }
 }
 

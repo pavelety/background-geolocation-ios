@@ -34,11 +34,25 @@
 - (NSArray<MAURLocation*>*) getValidLocations;
 - (BOOL) deleteLocation:(NSNumber*)locationId error:(NSError * __autoreleasing *)outError;
 - (BOOL) deleteAllLocations:(NSError * __autoreleasing *)outError;
+- (MAURLocation*)getCurrentLocation:(int)timeout maximumAge:(long)maximumAge
+                 enableHighAccuracy:(BOOL)enableHighAccuracy
+                              error:(NSError * __autoreleasing *)outError;
 - (MAURConfig*) getConfig;
 - (NSArray*) getLogEntries:(NSInteger)limit;
 - (NSArray*) getLogEntries:(NSInteger)limit fromLogEntryId:(NSInteger)entryId minLogLevelFromString:(NSString *)minLogLevel;
 - (void) forceSync;
 - (void) onAppTerminate;
+
+
+/**
+ * Sets a transform for each coordinate about to be committed (sent or saved for later sync).
+ * You can use this for modifying the coordinates in any way.
+ *
+ * If the transform returns <code>nil</code>, it will prevent the location from being committed.
+ * @param transform - the transform block
+ */
++ (void) setLocationTransform:(MAURLocationTransform _Nullable)transform;
++ (MAURLocationTransform _Nullable) locationTransform;
 
 @end
 

@@ -21,22 +21,31 @@
 #import "MAURLogging.h"
 #import "FMDBLogger.h"
 #import "MAURLogReader.h"
+#import "MAURLocationManager.h"
 #import "MAURActivityLocationProvider.h"
 #import "MAURDistanceFilterLocationProvider.h"
 #import "MAURRawLocationProvider.h"
 #import "MAURUncaughtExceptionLogger.h"
+#import "MAURPostLocationTask.h"
+#import "INTULocationManager.h"
 
 // error messages
 #define CONFIGURE_ERROR_MSG             "Configuration error."
 #define SERVICE_ERROR_MSG               "Cannot start service error."
 #define UNKNOWN_LOCATION_PROVIDER_MSG   "Unknown location provider."
 
+// Position errors
+// https://developer.mozilla.org/en-US/docs/Web/API/PositionError
+#define PERMISSION_DENIED       1
+#define POSITION_UNAVAILABLE    2
+#define TIMEOUT                 3
+
 static NSString * const BGGeolocationDomain = @"com.marianhello";
 static NSString * const TAG = @"BgGeo";
 
 FMDBLogger *sqliteLogger;
 
-@interface MAURBackgroundGeolocationFacade () <MAURProviderDelegate>
+@interface MAURBackgroundGeolocationFacade () <MAURProviderDelegate, MAURPostLocationTaskDelegate>
 @end
 
 @implementation MAURBackgroundGeolocationFacade {
@@ -78,6 +87,7 @@ FMDBLogger *sqliteLogger;
     logger->setEnabled(YES);
     
     postLocationTask = [[MAURPostLocationTask alloc] init];
+    postLocationTask.delegate = self;
     
     localNotification = [[UILocalNotification alloc] init];
     localNotification.timeZone = [NSTimeZone defaultTimeZone];
@@ -322,18 +332,18 @@ FMDBLogger *sqliteLogger;
     // https://github.com/mauron85/cordova-plugin-background-geolocation/issues/394
 }
 
-- (Location*) getStationaryLocation
+- (MAURLocation*) getStationaryLocation
 {
     return stationaryLocation;
 }
 
-- (NSArray<Location*>*) getLocations
+- (NSArray<MAURLocation*>*) getLocations
 {
     MAURSQLiteLocationDAO* locationDAO = [MAURSQLiteLocationDAO sharedInstance];
     return [locationDAO getAllLocations];
 }
 
-- (NSArray<Location*>*) getValidLocations
+- (NSArray<MAURLocation*>*) getValidLocations
 {
     MAURSQLiteLocationDAO* locationDAO = [MAURSQLiteLocationDAO sharedInstance];
     return [locationDAO getValidLocations];
@@ -345,10 +355,66 @@ FMDBLogger *sqliteLogger;
     return [locationDAO deleteLocation:locationId error:outError];
 }
 
-- (BOOL) deleteAllLocations:(NSError * __autoreleasing *)outError;
+- (BOOL) deleteAllLocations:(NSError * __autoreleasing *)outError
 {
     MAURSQLiteLocationDAO* locationDAO = [MAURSQLiteLocationDAO sharedInstance];
     return [locationDAO deleteAllLocations:outError];
+}
+
+- (MAURLocation*)getCurrentLocation:(int)timeout maximumAge:(long)maximumAge
+                 enableHighAccuracy:(BOOL)enableHighAccuracy
+                              error:(NSError * __autoreleasing *)outError
+{
+    __block NSError *error = nil;
+    __block CLLocation *location = nil;
+    
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    [self runOnMainThread:^{
+        CLLocation *currentLocation = [MAURLocationManager sharedInstance].locationManager.location;
+        if (currentLocation != nil) {
+            long locationAge = ceil(fabs([currentLocation.timestamp timeIntervalSinceNow]) * 1000);
+            if (locationAge <= maximumAge) {
+                location = currentLocation;
+                dispatch_semaphore_signal(sema);
+                return;
+            }
+        }
+
+        INTULocationManager *locationManager = [INTULocationManager sharedInstance];
+        float timeoutInSeconds = ceil((float)timeout/1000);
+        [locationManager requestLocationWithDesiredAccuracy:enableHighAccuracy ? INTULocationAccuracyRoom : INTULocationAccuracyCity
+                                                    timeout:timeoutInSeconds
+                                       delayUntilAuthorized:YES    // This parameter is optional, defaults to NO if omitted
+                                                      block:^(CLLocation *currentLocation, INTULocationAccuracy achievedAccuracy, INTULocationStatus status) {
+                                                          if (status == INTULocationStatusSuccess) {
+                                                              // Request succeeded, meaning achievedAccuracy is at least the requested accuracy, and
+                                                              // currentLocation contains the device's current location.
+                                                              location = currentLocation;
+                                                          }
+                                                          else if (status == INTULocationStatusTimedOut) {
+                                                              // Wasn't able to locate the user with the requested accuracy within the timeout interval.
+                                                              // However, currentLocation contains the best location available (if any) as of right now,
+                                                              // and achievedAccuracy has info on the accuracy/recency of the location in currentLocation.
+                                                              error = [NSError errorWithDomain:BGGeolocationDomain code:TIMEOUT userInfo:nil];
+                                                          }
+                                                          else {
+                                                              // An error occurred, more info is available by looking at the specific status returned.
+                                                              error = [NSError errorWithDomain:BGGeolocationDomain code:POSITION_UNAVAILABLE userInfo:nil];
+                                                          }
+                                                          dispatch_semaphore_signal(sema);
+                                                      }];
+    }];
+    dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+
+    if (location != nil) {
+        return [MAURLocation fromCLLocation:location];
+    }
+
+    if (outError != nil) {
+        *outError = error;
+    }
+
+    return nil;
 }
 
 - (MAURConfig*) getConfig
@@ -425,10 +491,11 @@ FMDBLogger *sqliteLogger;
     
     MAURConfig *config = [self getConfig];
     if ([config isDebugging]) {
-        [self notify:[NSString stringWithFormat:@"Stationary update: %s\nSPD: %0.0f | DF: %ld | ACY: %0.0f | RAD: %0.0f",
+        double distanceFilter = [MAURLocationManager sharedInstance].distanceFilter;
+        [self notify:[NSString stringWithFormat:@"Stationary update: %s\nSPD: %0.0f | DF: %f | ACY: %0.0f | RAD: %0.0f",
                       ((operationMode == MAURForegroundMode) ? "FG" : "BG"),
                       [location.speed doubleValue],
-                      (long) nil, //locationProvider.distanceFilter,
+                      distanceFilter,
                       [location.accuracy doubleValue],
                       [location.radius doubleValue]
                       ]];
@@ -451,10 +518,11 @@ FMDBLogger *sqliteLogger;
     
     MAURConfig *config = [self getConfig];
     if ([config isDebugging]) {
-        [self notify:[NSString stringWithFormat:@"Location update: %s\nSPD: %0.0f | DF: %ld | ACY: %0.0f",
+        double distanceFilter = [MAURLocationManager sharedInstance].distanceFilter;
+        [self notify:[NSString stringWithFormat:@"Location update: %s\nSPD: %0.0f | DF: %f | ACY: %0.0f",
                       ((operationMode == MAURForegroundMode) ? "FG" : "BG"),
                       [location.speed doubleValue],
-                      (long) nil, //locationProvider.distanceFilter,
+                      distanceFilter,
                       [location.accuracy doubleValue]
                       ]];
         
@@ -518,6 +586,44 @@ FMDBLogger *sqliteLogger;
 {
     DDLogDebug(@"%@ #dealloc", TAG);
     // currently noop
+}
+
+#pragma mark - Location transform
+
++ (void) setLocationTransform:(MAURLocationTransform _Nullable)transform
+{
+    [MAURPostLocationTask setLocationTransform:transform];
+}
+
++ (MAURLocationTransform _Nullable) locationTransform
+{
+    return [MAURPostLocationTask locationTransform];
+}
+
+#pragma mark - MAURPostLocationTaskDelegate
+
+- (void) postLocationTaskRequestedAbortUpdates:(MAURPostLocationTask *)task
+{
+    if (_delegate && [_delegate respondsToSelector:@selector(onAbortRequested)])
+    {
+        // We have a delegate, tell it that there's a request.
+        // It will decide whether to stop or not.
+        [_delegate onAbortRequested];
+    }
+    else
+    {
+        // No delegate, we may be running in the background.
+        // Let's just stop.
+        [self stop:nil];
+    }
+}
+
+- (void) postLocationTaskHttpAuthorizationUpdates:(MAURPostLocationTask *)task
+{
+    if (_delegate && [_delegate respondsToSelector:@selector(onHttpAuthorization)])
+    {
+        [_delegate onHttpAuthorization];
+    }
 }
 
 @end

@@ -11,6 +11,10 @@
 #import <Foundation/Foundation.h>
 #import <CoreLocation/CoreLocation.h>
 
+@class MAURLocation;
+
+typedef MAURLocation * _Nullable (^ MAURLocationTransform)(MAURLocation * _Nonnull location);
+
 typedef NS_ENUM(NSInteger, MAURLocationStatus) {
     MAURLocationDeleted = 0,
     MAURLocationPostPending = 1,
@@ -48,6 +52,7 @@ typedef NS_ENUM(NSInteger, MAURLocationStatus) {
 - (BOOL) isBetterLocation:(MAURLocation*)location;
 - (BOOL) isBeyond:(MAURLocation*)location radius:(NSInteger)radius;
 - (id) copyWithZone: (NSZone *)zone;
+- (id) getValueForKey:(id)key;
 
 @end
 
